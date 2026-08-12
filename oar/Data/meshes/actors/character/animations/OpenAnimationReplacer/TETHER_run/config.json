@@ -1,0 +1,5 @@
+{
+    "name": "TETHER Locomotion",
+    "author": "TETHER",
+    "description": "Locomotion swaps for actors engaged in TETHER hand-holding. Four sub-patterns: Player Male / Player Female / Follower Male / Follower Female. Uses TETHER's custom OAR conditions TETHER_IsTetheredPlayer and TETHER_IsTetheredFollower (registered by TETHER.dll on plugin load)."
+}

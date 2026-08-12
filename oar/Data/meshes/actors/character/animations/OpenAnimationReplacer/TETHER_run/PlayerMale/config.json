@@ -1,0 +1,21 @@
+{
+    "name": "TETHER Player Male",
+    "description": "Male player animation while holding a follower's hand (puller role).",
+    "priority": 10,
+    "conditions": [
+        {
+            "condition": "IsChild",
+            "requiredVersion": "1.0.0.0",
+            "negated": true
+        },
+        {
+            "condition": "IsFemale",
+            "requiredVersion": "1.0.0.0",
+            "negated": true
+        },
+        {
+            "condition": "TETHER_IsTetheredPlayer",
+            "requiredVersion": "1.0.0"
+        }
+    ]
+}

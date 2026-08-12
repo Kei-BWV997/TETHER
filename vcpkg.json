@@ -1,0 +1,17 @@
+{
+  "name": "tether",
+  "version": "0.1.0",
+  "description": "TETHER - Hand-Holding for Followers (SKSE plugin)",
+  "builtin-baseline": "ee12231b20c95013c6638d845d04c91559a1d1ff",
+  "dependencies": [
+    "directxmath",
+    "directxtk",
+    "fmt",
+    "nlohmann-json",
+    "rapidcsv",
+    "simpleini",
+    "spdlog",
+    "toml11",
+    "xbyak"
+  ]
+}

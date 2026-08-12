@@ -1,0 +1,39 @@
+# === Build artifacts ===
+build/
+out/
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.obj
+*.pex
+*.esp
+
+# === Third-party OAR dummy hkx (from Gulan0's walk_run_sprint mod) ===
+# Not redistributable in source repo without Gulan0's permission.
+# LoversLab release zip may include them once permission is obtained,
+# or they can be replaced with author's own recordings.
+oar/Data/meshes/actors/character/animations/OpenAnimationReplacer/TETHER_run/*/male/*.hkx
+oar/Data/meshes/actors/character/animations/OpenAnimationReplacer/TETHER_run/*/female/*.hkx
+
+# === IDE / OS ===
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+.DS_Store
+
+# === CMake temp ===
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+
+# === vcpkg ===
+vcpkg_installed/
+
+# === Logs / temp ===
+*.log
+*.tmp
