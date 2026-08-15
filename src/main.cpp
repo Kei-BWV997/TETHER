@@ -5,6 +5,7 @@
 #include "TetherController.h"
 #include "Settings.h"
 #include "OARConditions.h"
+#include "EquipEventSink.h"
 
 namespace
 {
@@ -48,6 +49,7 @@ namespace
 			TETHER::InputHandler::Register();
 			TETHER::PlayerUpdateHook::Install();
 			TETHER::SpeedHook::Install();
+			TETHER::EquipEventSink::Register();
 			logger::info("kDataLoaded: TETHER ready"sv);
 			break;
 		case SKSE::MessagingInterface::kPreLoadGame:

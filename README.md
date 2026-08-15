@@ -2,7 +2,7 @@
 
 Skyrim SE / AE 用 SKSE プラグイン。フォロワーとの継続的な hand-hold（歩行・走行・地形移動を通して手が離れない接続）を Havok ball-and-socket constraint と kinematic な位置制御の組み合わせで実装する。
 
-- **バージョン**: 1.0.0
+- **バージョン**: 1.0.2
 - **ソース**: https://github.com/Kei-BWV997/TETHER
 - **配布**: LoversLab（無料 / オープンソース）
 - **ライセンス**: MIT（ソース）／ CC0（ドキュメント）／ 第三者由来ファイルの扱いは `LICENSE` 参照
@@ -43,6 +43,7 @@ AI が参照した他 mod のソースコードは全て公開ライセンス下
 | `AddHavokBallAndSocketConstraint` を alive actor で機能させる方法 | asdsad121 の [Nexus フォーラム投稿 (2024)](https://forums.nexusmods.com/topic/6281756-attaching-an-object-to-an-actor/) | `ForceAddRagdollToWorld()` を両アクターに先に呼ぶと constraint が効くという発見。Papyrus wiki の "只の意識のあるアクターには効かない" 記述は古い |
 | Constraint 方式採用の動機 | [@Ashihito1 のツイート動画](https://x.com/Ashihito1/status/2086362692328247323) | プレイヤーが NPC の腕を掴んで引っ張る挙動を実演した映像。kinematic IK では出せない「接着面が一致した握手感」を確認して方針転換の判断材料になった |
 | HIGGS のフック層概念（参考のみ） | HIGGS (adamhynek) | 「アニメ確定後・NiNode::Update 直前」レイヤの概念。実際には kinematic IK を最終的に構造から外したため、当該フックは使用していない |
+| ボーンポインタのメモリ安全 (NiPointer + skeleton attachment check) | hdtSMP64 (asdt123123) | `NetImmerseUtils.h` の `isValidNiObject` (vtable健全性) と `Skeleton::isActiveInScene` (3-level parent chain) を移植 |
 
 ---
 
@@ -225,6 +226,13 @@ kDataLoaded: TETHER ready
 ---
 
 ## Changelog
+
+### 1.0.2 (2026-08-13)
+- **装備変更時の auto-release 追加**: tether 中のプレイヤーまたはフォロワーが装備変更したら即 release。`ForceAddRagdollToWorld` 状態と armor re-attach の競合で ragdoll 状態が半壊 (両足が浮く等) するのを予防
+- **プレイヤーの head tracking を一時無効化**: engage 中 `SetHeadTracking(false)`、release で復元。3rd person で engine が camera pitch を head bone に適用する挙動を止める。フォロワー側は untouched (NPC が周囲を見る通常挙動を維持)。ragdoll 物理由来の頭傾きは engine 側 Havok の挙動で残るため authored アニメでの counter-tilt 調整推奨
+
+### 1.0.1 (2026-08-13)
+- **メモリ安全性の強化**（asdt123123 氏の指摘反映）: キャッシュしていたボーンの raw pointer を全て `NiPointer` に置換。加えて毎フレーム、cached bone の vtable 健全性 + skeleton の scene-attachment (3-level parent chain) + bone が現 skeleton root の子孫かを検証、失敗時は即 `ForceRelease` するように。実装は hdtSMP64 のパターン準拠
 
 ### 1.0.0 (2026-08-12) — 初回リリース
 - Havok ball-and-socket constraint による手の接続

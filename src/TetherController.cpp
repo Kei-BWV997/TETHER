@@ -1,6 +1,7 @@
 #include "PCH.h"
 #include "TetherController.h"
 #include "Settings.h"
+#include "NetImmerseUtils.h"
 
 #include <cmath>
 
@@ -205,6 +206,24 @@ namespace TETHER
 		logger::info("AddHavokBallAndSocketConstraint dispatch: {}"sv, ok ? "OK" : "FAILED"sv);
 	}
 
+	// Toggle NPC/actor head tracking. Called on the PLAYER only during tether —
+	// stops the engine-side "head follows camera pitch" behavior that overrides
+	// the authored animation's head pose in third-person. Follower head tracking
+	// is left untouched so NPCs continue to look around normally.
+	static void SetHeadTracking(RE::Actor* a_actor, bool a_enable)
+	{
+		auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
+		if (!vm || !a_actor) return;
+		auto* policy = vm->GetObjectHandlePolicy();
+		if (!policy) return;
+		auto handle = policy->GetHandleForObject(a_actor->GetFormType(), a_actor);
+		if (handle == policy->EmptyHandle()) return;
+
+		auto* args = RE::MakeFunctionArguments(std::move(a_enable));
+		RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> cb;
+		vm->DispatchMethodCall(handle, "Actor"sv, "SetHeadTracking"sv, args, cb);
+	}
+
 	void TetherController::ReleaseHavokConstraint(RE::Actor* a_follower, RE::Actor* a_player) const
 	{
 		auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
@@ -402,12 +421,17 @@ namespace TETHER
 			return false;
 		}
 
-		bones_.fUpper = f3d->GetObjectByName(kNodeRUpperArm);
-		bones_.fFore  = f3d->GetObjectByName(kNodeRForearm);
-		bones_.fHand  = f3d->GetObjectByName(kNodeRHand);
-		bones_.pUpper = p3d->GetObjectByName(kNodeLUpperArm);
-		bones_.pFore  = p3d->GetObjectByName(kNodeLForearm);
-		bones_.pHand  = p3d->GetObjectByName(kNodeLHand);
+		// Wrap raw lookups into NiPointer so we hold a ref count. If any of these
+		// underlying objects gets replaced by the engine (armor swap, 3D reload,
+		// etc.), our NiPointer will still point at valid memory — but the object
+		// will be an "orphan" no longer attached to the actor. The per-frame
+		// skeleton-attached check in OnUpdate detects that case.
+		bones_.fUpper.reset(f3d->GetObjectByName(kNodeRUpperArm));
+		bones_.fFore .reset(f3d->GetObjectByName(kNodeRForearm));
+		bones_.fHand .reset(f3d->GetObjectByName(kNodeRHand));
+		bones_.pUpper.reset(p3d->GetObjectByName(kNodeLUpperArm));
+		bones_.pFore .reset(p3d->GetObjectByName(kNodeLForearm));
+		bones_.pHand .reset(p3d->GetObjectByName(kNodeLHand));
 
 		if (!bones_.fUpper || !bones_.fFore || !bones_.fHand ||
 			!bones_.pUpper || !bones_.pFore || !bones_.pHand) {
@@ -417,15 +441,41 @@ namespace TETHER
 			return false;
 		}
 
-		bones_.fL1 = WorldDistance(bones_.fUpper, bones_.fFore);
-		bones_.fL2 = WorldDistance(bones_.fFore, bones_.fHand);
-		bones_.pL1 = WorldDistance(bones_.pUpper, bones_.pFore);
-		bones_.pL2 = WorldDistance(bones_.pFore, bones_.pHand);
+		// Cache the root 3D too so we can verify per-frame that bones are still
+		// under the current skeleton.
+		bones_.fRoot.reset(f3d);
+		bones_.pRoot.reset(p3d);
+
+		bones_.fL1 = WorldDistance(bones_.fUpper.get(), bones_.fFore.get());
+		bones_.fL2 = WorldDistance(bones_.fFore .get(), bones_.fHand.get());
+		bones_.pL1 = WorldDistance(bones_.pUpper.get(), bones_.pFore.get());
+		bones_.pL2 = WorldDistance(bones_.pFore .get(), bones_.pHand.get());
 		bones_.valid = true;
 
 		logger::info("Bones cached: follower arm L1={:.1f} L2={:.1f} (reach={:.1f}u), player arm L1={:.1f} L2={:.1f} (reach={:.1f}u)"sv,
 			bones_.fL1, bones_.fL2, bones_.fL1 + bones_.fL2,
 			bones_.pL1, bones_.pL2, bones_.pL1 + bones_.pL2);
+
+		// --- NiPointer safety diagnostic (per asdt123123's review) ---------------
+		// Proof that we're actually holding NiPointer refs on the cached bones.
+		// After NiPointer::reset(raw), the target NiRefObject's refCount is
+		// incremented, so these values should all be >= 2 (engine holds 1, we hold 1;
+		// higher if other systems also ref it — e.g. animation, physics).
+		auto rc = [](const RE::NiRefObject* o) -> unsigned {
+			return o ? static_cast<unsigned>(o->GetRefCount()) : 0u;
+		};
+		logger::info("NiPointer safety: refs acquired — "
+			"pRoot@{} rc={}, pUpper@{} rc={}, pFore@{} rc={}, pHand@{} rc={}"sv,
+			static_cast<const void*>(bones_.pRoot.get()),  rc(bones_.pRoot.get()),
+			static_cast<const void*>(bones_.pUpper.get()), rc(bones_.pUpper.get()),
+			static_cast<const void*>(bones_.pFore .get()), rc(bones_.pFore.get()),
+			static_cast<const void*>(bones_.pHand .get()), rc(bones_.pHand.get()));
+		logger::info("NiPointer safety: refs acquired — "
+			"fRoot@{} rc={}, fUpper@{} rc={}, fFore@{} rc={}, fHand@{} rc={}"sv,
+			static_cast<const void*>(bones_.fRoot.get()),  rc(bones_.fRoot.get()),
+			static_cast<const void*>(bones_.fUpper.get()), rc(bones_.fUpper.get()),
+			static_cast<const void*>(bones_.fFore .get()), rc(bones_.fFore.get()),
+			static_cast<const void*>(bones_.fHand .get()), rc(bones_.fHand.get()));
 
 		// AXIS DIAGNOSTIC: figure out which local axis is the bone-forward direction
 		// on this rig. Compute (Elbow - Shoulder) in world, then dot with each column
@@ -442,16 +492,26 @@ namespace TETHER
 				label, d.x, d.y, d.z, c0.Dot(d), c1.Dot(d), c2.Dot(d));
 		};
 		logger::info("Axis probe (identify which local axis is bone-forward):"sv);
-		reportAxis("pUpper", bones_.pUpper, bones_.pFore);
-		reportAxis("pFore",  bones_.pFore,  bones_.pHand);
-		reportAxis("fUpper", bones_.fUpper, bones_.fFore);
-		reportAxis("fFore",  bones_.fFore,  bones_.fHand);
+		reportAxis("pUpper", bones_.pUpper.get(), bones_.pFore.get());
+		reportAxis("pFore",  bones_.pFore .get(), bones_.pHand.get());
+		reportAxis("fUpper", bones_.fUpper.get(), bones_.fFore.get());
+		reportAxis("fFore",  bones_.fFore .get(), bones_.fHand.get());
 		return true;
 	}
 
 	void TetherController::ClearBones()
 	{
-		bones_ = BoneCache{};
+		if (bones_.valid) {
+			auto rc = [](const RE::NiRefObject* o) -> unsigned {
+				return o ? static_cast<unsigned>(o->GetRefCount()) : 0u;
+			};
+			logger::info("NiPointer safety: releasing refs — "
+				"pHand rc(before drop)={}, fHand rc(before drop)={}, "
+				"pRoot rc(before drop)={}, fRoot rc(before drop)={}"sv,
+				rc(bones_.pHand.get()), rc(bones_.fHand.get()),
+				rc(bones_.pRoot.get()), rc(bones_.fRoot.get()));
+		}
+		bones_ = BoneCache{};  // NiPointer destructors run here → refCount decremented
 	}
 
 	void TetherController::OnUpdate(RE::PlayerCharacter* a_player, float a_delta)
@@ -493,10 +553,61 @@ namespace TETHER
 			engageCell_ = curCell;
 		}
 		// 3D validity fallback for anything the above didn't catch.
-		if (!a_player->Get3D() || !follower->Get3D()) {
+		auto* p3d = a_player->Get3D();
+		auto* f3d = follower->Get3D();
+		if (!p3d || !f3d) {
 			logger::warn("ForceRelease: 3D unavailable (transition)"sv);
 			ForceRelease();
 			return;
+		}
+
+		// Per-frame skeleton-health check (per asdt123123's review):
+		// (1) Cached NiPointers must still hold valid NiObjects (vtable sanity).
+		// (2) Skeleton root must still be attached to the world scene (3 levels up).
+		// (3) Cached bones must still be under the CURRENT skeleton root — if the
+		//     actor's 3D was replaced (armor swap, etc.), our cached bones become
+		//     "orphan zombies": alive via NiPointer ref-count but no longer part of
+		//     the visible skeleton. Bail cleanly.
+		using namespace NiSafe;
+		if (bones_.valid) {
+			// Skeletons must be attached to the world scene AND match what we cached.
+			if (!IsSkeletonAttachedToScene(p3d) || !IsSkeletonAttachedToScene(f3d) ||
+				p3d != bones_.pRoot.get() || f3d != bones_.fRoot.get()) {
+				logger::warn("ForceRelease: skeleton replaced or detached from scene"sv);
+				ForceRelease();
+				return;
+			}
+			// Every cached bone must pass vtable sanity AND be a descendant of its root.
+			const RE::NiAVObject* bones[]  = {
+				bones_.pUpper.get(), bones_.pFore.get(), bones_.pHand.get(),
+				bones_.fUpper.get(), bones_.fFore.get(), bones_.fHand.get(),
+			};
+			const RE::NiAVObject* roots[] = { p3d, p3d, p3d, f3d, f3d, f3d };
+			for (size_t i = 0; i < 6; ++i) {
+				if (!IsValidNiObject(bones[i]) || !IsBoneUnderRoot(bones[i], roots[i])) {
+					logger::warn("ForceRelease: cached bone orphaned or invalid (index {})"sv, i);
+					ForceRelease();
+					return;
+				}
+			}
+
+			// --- Positive proof the safety checks ran successfully -------------------
+			// One-shot: first frame after CacheBones where all checks passed.
+			if (!bones_.diagOkLogged) {
+				bones_.diagOkLogged = true;
+				logger::info("NiPointer safety: first per-frame check PASSED — "
+					"IsSkeletonAttachedToScene(p/f)=1/1, root match(p/f)=1/1, "
+					"6/6 bones IsValidNiObject & IsBoneUnderRoot"sv);
+			}
+			// Heartbeat every ~2s so the log shows the checks kept running.
+			bones_.diagHeartbeatAcc += a_delta;
+			if (bones_.diagHeartbeatAcc >= 2.0f) {
+				bones_.diagHeartbeatAcc = 0.0f;
+				logger::info("NiPointer safety: heartbeat OK (2s) — "
+					"pHand rc={}, fHand rc={}"sv,
+					bones_.pHand ? static_cast<unsigned>(bones_.pHand->GetRefCount()) : 0u,
+					bones_.fHand ? static_cast<unsigned>(bones_.fHand->GetRefCount()) : 0u);
+			}
 		}
 
 		// --- Auto-release triggers (all MCM-toggleable) ------------------------------
@@ -560,7 +671,7 @@ namespace TETHER
 		const RE::NiPoint3 rightDir {  std::cos(yaw), -std::sin(yaw), 0.0f };
 
 		// Step 1: solve player left arm IK to grip.
-		SolveArmIK(bones_.pUpper, bones_.pFore, bones_.pL1, bones_.pL2, pShoulder, grip, leftDir);
+		SolveArmIK(bones_.pUpper.get(), bones_.pFore.get(), bones_.pL1, bones_.pL2, pShoulder, grip, leftDir);
 
 		// Step 2: propagate player arm world transforms IMMEDIATELY so the player's
 		// hand world position reflects our IK write before we compute follower target.
@@ -573,7 +684,7 @@ namespace TETHER
 		const RE::NiPoint3 pHandWorld = bones_.pHand->world.translate;
 
 		// Step 4: solve follower right arm IK targeting player's actual hand position.
-		SolveArmIK(bones_.fUpper, bones_.fFore, bones_.fL1, bones_.fL2, fShoulder, pHandWorld, rightDir);
+		SolveArmIK(bones_.fUpper.get(), bones_.fFore.get(), bones_.fL1, bones_.fL2, fShoulder, pHandWorld, rightDir);
 		bones_.fUpper->Update(ud);
 	}
 
@@ -603,6 +714,12 @@ namespace TETHER
 			if (kUseHavokConstraint) {
 				ApplyHavokConstraint(target, player);
 			}
+			// Disable player head tracking so engine-side camera-pitch follow doesn't
+			// override the authored head pose. Follower is untouched (NPCs keep
+			// looking around normally). Does not fix the ragdoll-physics head tilt
+			// (that's inherent to Havok — author counter-tilt in the source anim
+			// to compensate), but removes at least the camera-driven component.
+			SetHeadTracking(player, false);
 			auto& s = *Settings::GetSingleton();
 			logger::info("engaged: target='{}' (formID=0x{:08X}) offset(R={:.0f} B={:.0f} follow={:.0f}/catch={:.0f}) [kinematic={} constraint={}]"sv,
 				target->GetName(), target->GetFormID(),
@@ -622,6 +739,9 @@ namespace TETHER
 				if (kUseHavokConstraint) {
 					ReleaseHavokConstraint(actor, player);
 				}
+			}
+			if (player) {
+				SetHeadTracking(player, true);  // restore player head tracking
 			}
 			ClearBones();
 			logger::info("released: target='{}' (offset cleared)"sv, name);
@@ -645,6 +765,9 @@ namespace TETHER
 			if (kUseHavokConstraint && player) {
 				ReleaseHavokConstraint(actor, player);
 			}
+		}
+		if (player) {
+			SetHeadTracking(player, true);
 		}
 		ClearBones();
 		target_           = RE::ActorHandle{};

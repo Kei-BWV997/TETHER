@@ -44,21 +44,38 @@ namespace TETHER
 
 		struct BoneCache
 		{
-			// Follower right arm chain (2-bone IK, elastic reach)
-			RE::NiAVObject* fUpper = nullptr;
-			RE::NiAVObject* fFore  = nullptr;
-			RE::NiAVObject* fHand  = nullptr;
-			float           fL1    = 0.0f;
-			float           fL2    = 0.0f;
+			// NiPointer (ref-counted) instead of raw pointers to prevent dangling
+			// access if the actor's 3D is torn down while tethered. Per asdt123123's
+			// review — see NetImmerseUtils.h for full rationale.
+			// Even with NiPointer, the object can become an "orphan zombie"
+			// (alive but detached from the current skeleton), so per-frame skeleton
+			// health checks are still required (see OnUpdate).
 
-			// Player left arm chain (rigid FK aim)
-			RE::NiAVObject* pUpper = nullptr;
-			RE::NiAVObject* pFore  = nullptr;
-			RE::NiAVObject* pHand  = nullptr;
-			float           pL1    = 0.0f;
-			float           pL2    = 0.0f;
+			// Follower right arm chain
+			RE::NiPointer<RE::NiAVObject> fUpper;
+			RE::NiPointer<RE::NiAVObject> fFore;
+			RE::NiPointer<RE::NiAVObject> fHand;
+			float                         fL1 = 0.0f;
+			float                         fL2 = 0.0f;
 
-			bool            valid  = false;
+			// Player left arm chain
+			RE::NiPointer<RE::NiAVObject> pUpper;
+			RE::NiPointer<RE::NiAVObject> pFore;
+			RE::NiPointer<RE::NiAVObject> pHand;
+			float                         pL1 = 0.0f;
+			float                         pL2 = 0.0f;
+
+			// Root 3D of each actor at engage time — used per-frame to verify our
+			// cached bones are still attached to the same skeleton.
+			RE::NiPointer<RE::NiAVObject> fRoot;
+			RE::NiPointer<RE::NiAVObject> pRoot;
+
+			bool                          valid = false;
+
+			// Diagnostic state for verifying NiPointer + per-frame safety checks
+			// are actually running. Reset with the rest of BoneCache each engage.
+			bool                          diagOkLogged      = false;  // one-shot "all checks passed"
+			float                         diagHeartbeatAcc  = 0.0f;   // seconds since last heartbeat
 		};
 
 		bool CacheBones(RE::Actor* a_follower, RE::PlayerCharacter* a_player);
