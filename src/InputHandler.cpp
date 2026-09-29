@@ -5,43 +5,36 @@
 
 namespace TETHER
 {
-	// Translate the raw ButtonEvent IDCode to SkyUI's unified keycode space, which
-	// is what `AddKeyMapOption` in MCM stores. Keyboard = 0..255 (DIK, identity),
-	// Mouse = 256+button, Gamepad = 266..281 mapped from XInput/Skyrim raw values.
-	// Skyrim's gamepad raw codes are XInput bitmasks for buttons plus synthetic
-	// 0x400/0x800 for LT/RT triggers.
-	static std::uint32_t TranslateToSkyUICode(RE::INPUT_DEVICE device, std::uint32_t raw)
+	// While holding hands the key lets go (no prompt is shown then). While not holding
+	// hands the key starts hand-holding only when the 'Hold hands' prompt is turned
+	// off in the settings; otherwise SkyPrompt handles the start.
+	namespace
 	{
-		if (device == RE::INPUT_DEVICE::kKeyboard) {
-			return raw;
-		}
-		if (device == RE::INPUT_DEVICE::kMouse) {
-			return raw + 256;
-		}
-		if (device == RE::INPUT_DEVICE::kGamepad) {
-			switch (raw) {
-				case 0x0001: return 266;  // DPad Up
-				case 0x0002: return 267;  // DPad Down
-				case 0x0004: return 268;  // DPad Left
-				case 0x0008: return 269;  // DPad Right
-				case 0x0010: return 270;  // Start
-				case 0x0020: return 271;  // Back
-				case 0x0040: return 272;  // Left Thumb click
-				case 0x0080: return 273;  // Right Thumb click
-				case 0x0100: return 274;  // LB (Left Shoulder)
-				case 0x0200: return 275;  // RB (Right Shoulder)
-				case 0x1000: return 276;  // A
-				case 0x2000: return 277;  // B
-				case 0x4000: return 278;  // X
-				case 0x8000: return 279;  // Y
-				case 0x0009:              // LT alt code (some builds)
-				case 0x0400: return 280;  // LT
-				case 0x000A:              // RT alt code
-				case 0x0800: return 281;  // RT
-				default:     return raw;  // DPad diagonals, unrecognized — no MCM binding
+		// Some builds report LT/RT as synthetic 0x400/0x800; SkyPrompt and the UI use
+		// BSWin32GamepadDevice::Key (0x9/0xA).
+		std::uint32_t NormalizePad(std::uint32_t a_raw)
+		{
+			switch (a_raw) {
+			case 0x0400: return 0x0009;
+			case 0x0800: return 0x000A;
+			default:     return a_raw;
 			}
 		}
-		return raw;
+
+		bool MatchesKey(RE::INPUT_DEVICE a_device, std::uint32_t a_raw)
+		{
+			const auto& s = *Settings::GetSingleton();
+			switch (a_device) {
+			case RE::INPUT_DEVICE::kKeyboard:
+				return s.KeyboardKey() != 0 && a_raw == s.KeyboardKey();
+			case RE::INPUT_DEVICE::kMouse:
+				return s.KeyboardKey() >= 256 && a_raw + 256 == s.KeyboardKey();
+			case RE::INPUT_DEVICE::kGamepad:
+				return s.GamepadKey() != 0 && NormalizePad(a_raw) == s.GamepadKey();
+			default:
+				return false;
+			}
+		}
 	}
 
 	InputHandler* InputHandler::GetSingleton()
@@ -58,8 +51,9 @@ namespace TETHER
 			return;
 		}
 		mgr->AddEventSink(GetSingleton());
-		logger::info("InputHandler registered (toggle key from MCM, default DIK 0x{:02X})"sv,
-			Settings::GetSingleton()->Hotkey());
+		logger::info("InputHandler registered (keyboard={} gamepad=0x{:X} showPrompt={})"sv,
+			Settings::GetSingleton()->KeyboardKey(), Settings::GetSingleton()->GamepadKey(),
+			Settings::GetSingleton()->ShowPrompt());
 	}
 
 	RE::BSEventNotifyControl InputHandler::ProcessEvent(RE::InputEvent* const* a_event,
@@ -68,37 +62,37 @@ namespace TETHER
 		if (!a_event) {
 			return RE::BSEventNotifyControl::kContinue;
 		}
-
-		// Skip while any menu is up (keeps hotkey from firing in inventory/console/dialogue).
+		auto*      ctl   = TetherController::GetSingleton();
+		const bool isOff = ctl->GetState() == TetherController::State::Off;
+		if (isOff && Settings::GetSingleton()->ShowPrompt()) {
+			return RE::BSEventNotifyControl::kContinue;
+		}
+		// Skip while any menu is up (keeps the key from firing in inventory/console/dialogue).
 		if (auto* ui = RE::UI::GetSingleton(); ui && ui->GameIsPaused()) {
 			return RE::BSEventNotifyControl::kContinue;
 		}
 
-		const std::uint32_t hotkey = Settings::GetSingleton()->Hotkey();
-
 		for (auto* event = *a_event; event; event = event->next) {
 			auto* button = event->AsButtonEvent();
-			if (!button) {
+			if (!button || !button->IsDown()) {
 				continue;
 			}
-			const auto device = event->GetDevice();
-			if (device != RE::INPUT_DEVICE::kKeyboard &&
-				device != RE::INPUT_DEVICE::kMouse    &&
-				device != RE::INPUT_DEVICE::kGamepad) {
+			const auto          device = event->GetDevice();
+			const std::uint32_t raw    = button->GetIDCode();
+			if (!MatchesKey(device, raw)) {
 				continue;
 			}
-			const std::uint32_t rawCode  = button->GetIDCode();
-			const std::uint32_t skyuiCode = TranslateToSkyUICode(device, rawCode);
-			if (skyuiCode != hotkey) {
-				continue;
+			logger::info("{} key pressed (device={}, raw=0x{:X})"sv,
+				isOff ? "Hold hands"sv : "Release"sv,
+				device == RE::INPUT_DEVICE::kGamepad ? "gamepad"sv :
+				device == RE::INPUT_DEVICE::kMouse   ? "mouse"sv : "keyboard"sv,
+				raw);
+			if (isOff) {
+				ctl->TryEngage();
+			} else {
+				ctl->ReleaseByUser();
 			}
-			if (button->IsDown()) {
-				logger::info("Hotkey pressed (device={}, raw=0x{:X}, skyui=0x{:X})"sv,
-					device == RE::INPUT_DEVICE::kGamepad ? "gamepad"sv :
-					device == RE::INPUT_DEVICE::kMouse   ? "mouse"sv : "keyboard"sv,
-					rawCode, skyuiCode);
-				TetherController::GetSingleton()->Toggle();
-			}
+			break;
 		}
 
 		return RE::BSEventNotifyControl::kContinue;

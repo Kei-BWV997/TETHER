@@ -1,6 +1,7 @@
 #include "PCH.h"
 #include "TetherController.h"
 #include "Settings.h"
+#include "Prompt.h"
 #include "NetImmerseUtils.h"
 
 #include <cmath>
@@ -8,7 +9,6 @@
 namespace TETHER
 {
 	// Non-MCM tuning (engage cone geometry — not user-facing).
-	static constexpr float kMaxDistance     = 512.0f;    // ~7 m engage range
 	static constexpr float kFrontConeCosMin = 0.70710678f; // cos(45°) → ±45° half-cone
 
 	// Mode selection (compile-time for Iteration A; MCM-exposed in Iteration B).
@@ -18,6 +18,15 @@ namespace TETHER
 	// Grip drop (used only when kUseKinematicArm; kept for that fallback).
 	static constexpr float kGripDropZ         =  25.0f;
 	static constexpr float kArmStretchFactor  = 1.10f;
+
+	// Engaging phase. ForceAddRagdollToWorld freezes the head/chest relation at
+	// whatever pose is current, so the ragdoll + constraint are applied only after
+	// the Enter clip has brought the body into the hand-hold pose (grip delay: Settings).
+	static constexpr float kEnterWaitMax = 3.0f;  // s from engage; grip anyway if no Enter clip was selected
+
+	// Ignore release-key presses this soon after engaging, so the same press that
+	// accepted the prompt can never also count as "let go".
+	static constexpr float kReleaseDebounce = 0.25f;
 
 	TetherController* TetherController::GetSingleton()
 	{
@@ -38,6 +47,26 @@ namespace TETHER
 		auto ptr = target_.get();
 		if (!ptr) return false;
 		return ptr.get() == a_actor;
+	}
+
+	bool TetherController::IsEngagingPlayer(RE::TESObjectREFR* a_actor) const
+	{
+		if (state_ != State::Engaging || !a_actor) return false;
+		auto* pc = RE::PlayerCharacter::GetSingleton();
+		return pc && a_actor == pc;
+	}
+
+	bool TetherController::IsEngagingFollower(RE::TESObjectREFR* a_actor) const
+	{
+		if (state_ != State::Engaging || !a_actor) return false;
+		auto ptr = target_.get();
+		if (!ptr) return false;
+		return ptr.get() == a_actor;
+	}
+
+	void TetherController::MarkEnterSelected(bool a_player) const
+	{
+		(a_player ? playerEnterSeen_ : followerEnterSeen_).store(true, std::memory_order_relaxed);
 	}
 
 	float TetherController::GetSpeedMultiplierFor(RE::Actor* a_actor) const
@@ -96,7 +125,8 @@ namespace TETHER
 		const RE::NiPoint3 forward{ std::sin(yaw), std::cos(yaw), 0.0f };
 
 		RE::Actor* best     = nullptr;
-		float      bestDist = kMaxDistance;
+		const float maxDist  = Settings::GetSingleton()->EngageDistance();
+		float       bestDist = maxDist;
 
 		for (auto& handle : pl->highActorHandles) {
 			auto ptr = handle.get();
@@ -113,7 +143,7 @@ namespace TETHER
 
 			auto        delta = actor->GetPosition() - pPos;
 			const float dist  = delta.Length();
-			if (dist <= 0.001f || dist > kMaxDistance) {
+			if (dist <= 0.001f || dist > maxDist) {
 				continue;
 			}
 			delta /= dist;
@@ -514,9 +544,45 @@ namespace TETHER
 		bones_ = BoneCache{};  // NiPointer destructors run here → refCount decremented
 	}
 
+	const char* TetherController::DetectTransition(RE::PlayerCharacter* a_player, RE::Actor* a_follower)
+	{
+		// Skyrim exterior worldspaces are divided into 4096u grid cells; walking across
+		// an exterior boundary changes `parentCell` without invalidating 3D or ragdoll
+		// state. Only real load transitions (interior door, worldspace change) tear the
+		// actor's 3D down. Detect those specifically.
+		auto* curWorld = a_player->GetWorldspace();
+		auto* curCell  = a_player->parentCell;
+		if (curWorld != engageWorldspace_) {
+			return "worldspace change";
+		}
+		if (curCell != engageCell_) {
+			const bool wasInterior = engageCell_ && engageCell_->IsInteriorCell();
+			const bool nowInterior = curCell && curCell->IsInteriorCell();
+			if (wasInterior || nowInterior) {
+				return "interior boundary crossed";
+			}
+			engageCell_ = curCell;
+		}
+		if (!a_player->Get3D() || !a_follower->Get3D()) {
+			return "3D unavailable (transition)";
+		}
+		return nullptr;
+	}
+
 	void TetherController::OnUpdate(RE::PlayerCharacter* a_player, float a_delta)
 	{
-		if (state_ != State::Held || !a_player) {
+		if (!a_player) {
+			return;
+		}
+		if (state_ == State::Off) {
+			UpdatePrompt(a_player);
+			return;
+		}
+		if (state_ == State::Engaging) {
+			UpdateEngaging(a_player, a_delta);
+			return;
+		}
+		if (state_ != State::Held) {
 			return;
 		}
 		auto ptr = target_.get();
@@ -530,36 +596,13 @@ namespace TETHER
 			return;
 		}
 
-		// Cell transition safety. Skyrim exterior worldspaces are divided into 4096u
-		// grid cells; walking across an exterior boundary changes `parentCell` without
-		// invalidating 3D or ragdoll state. Only real load transitions (interior
-		// door, worldspace change) tear the actor's 3D down. Detect those specifically.
-		auto* curWorld = a_player->GetWorldspace();
-		auto* curCell  = a_player->parentCell;
-		if (curWorld != engageWorldspace_) {
-			logger::warn("ForceRelease: worldspace change"sv);
+		if (const char* reason = DetectTransition(a_player, follower)) {
+			logger::warn("ForceRelease: {}"sv, reason);
 			ForceRelease();
 			return;
 		}
-		if (curCell != engageCell_) {
-			const bool wasInterior = engageCell_ && engageCell_->IsInteriorCell();
-			const bool nowInterior = curCell && curCell->IsInteriorCell();
-			if (wasInterior || nowInterior) {
-				logger::warn("ForceRelease: interior boundary crossed"sv);
-				ForceRelease();
-				return;
-			}
-			// Exterior-to-exterior in same worldspace — safe, just update tracker.
-			engageCell_ = curCell;
-		}
-		// 3D validity fallback for anything the above didn't catch.
 		auto* p3d = a_player->Get3D();
 		auto* f3d = follower->Get3D();
-		if (!p3d || !f3d) {
-			logger::warn("ForceRelease: 3D unavailable (transition)"sv);
-			ForceRelease();
-			return;
-		}
 
 		// Per-frame skeleton-health check (per asdt123123's review):
 		// (1) Cached NiPointers must still hold valid NiObjects (vtable sanity).
@@ -688,44 +731,68 @@ namespace TETHER
 		bones_.fUpper->Update(ud);
 	}
 
-	void TetherController::Toggle()
+	void TetherController::UpdatePrompt(RE::PlayerCharacter* a_player)
+	{
+		if (!Prompt::IsAvailable()) {
+			return;
+		}
+		if (!Settings::GetSingleton()->ShowPrompt()) {
+			Prompt::Hide();  // no-op unless it was showing when the option was turned off
+			return;
+		}
+		RE::Actor* candidate = nullptr;
+		if (auto* st = a_player->AsActorState(); st && !st->IsWeaponDrawn()) {
+			candidate = FindTarget(a_player);
+		}
+		if (candidate) {
+			Prompt::Show(candidate);
+		} else {
+			Prompt::Hide();
+		}
+	}
+
+	void TetherController::TryEngage()
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player || state_ != State::Off) {
+			return;
+		}
+		Prompt::Hide();
+		if (!CanEngage(player)) {
+			return;
+		}
+		auto* target = FindTarget(player);
+		if (!target) {
+			logger::info("engage denied: no eligible follower in front cone (<= {:.0f} units)"sv,
+				Settings::GetSingleton()->EngageDistance());
+			return;
+		}
+		target_           = target->GetHandle();
+		engageCell_       = player->parentCell;
+		engageWorldspace_ = player->GetWorldspace();
+		extremeDistSecs_  = 0.0f;
+		ResetEngagingTimers();
+		ApplyOffset(target, player);
+		state_ = State::Engaging;
+		logger::info("engaging: target='{}' (formID=0x{:08X}) — waiting for Enter clip (grip {:.2f}s after Enter, fallback {:.1f}s after engage)"sv,
+			target->GetName(), target->GetFormID(), Settings::GetSingleton()->GripDelay(), kEnterWaitMax);
+	}
+
+	void TetherController::ReleaseByUser()
 	{
 		auto* player = RE::PlayerCharacter::GetSingleton();
 		if (!player) {
 			return;
 		}
-
-		if (state_ == State::Off) {
-			if (!CanEngage(player)) {
+		if (state_ == State::Engaging) {
+			if (engagingSecs_ < kReleaseDebounce) {
+				logger::info("release key ignored ({:.0f}ms after engage, debounce)"sv, engagingSecs_ * 1000.0f);
 				return;
 			}
-			auto* target = FindTarget(player);
-			if (!target) {
-				logger::info("engage denied: no eligible follower in front cone (<= {:.0f} units)"sv, kMaxDistance);
-				return;
-			}
-			target_           = target->GetHandle();
-			state_            = State::Held;
-			engageCell_       = player->parentCell;
-			engageWorldspace_ = player->GetWorldspace();
-			extremeDistSecs_  = 0.0f;
-			ApplyOffset(target, player);
-			CacheBones(target, player);
-			if (kUseHavokConstraint) {
-				ApplyHavokConstraint(target, player);
-			}
-			// Disable player head tracking so engine-side camera-pitch follow doesn't
-			// override the authored head pose. Follower is untouched (NPCs keep
-			// looking around normally). Does not fix the ragdoll-physics head tilt
-			// (that's inherent to Havok — author counter-tilt in the source anim
-			// to compensate), but removes at least the camera-driven component.
-			SetHeadTracking(player, false);
-			auto& s = *Settings::GetSingleton();
-			logger::info("engaged: target='{}' (formID=0x{:08X}) offset(R={:.0f} B={:.0f} follow={:.0f}/catch={:.0f}) [kinematic={} constraint={}]"sv,
-				target->GetName(), target->GetFormID(),
-				s.OffsetRight(), s.OffsetBack(), s.FollowRadius(), s.CatchupRadius(),
-				kUseKinematicArm, kUseHavokConstraint);
-		} else {
+			CancelEngaging("release key pressed"sv);
+			return;
+		}
+		if (state_ == State::Held) {
 			const char* name = "<lost>";
 			RE::Actor*  actor = nullptr;
 			if (auto ptr = target_.get(); ptr) {
@@ -752,8 +819,95 @@ namespace TETHER
 		}
 	}
 
+	void TetherController::ResetEngagingTimers()
+	{
+		engagingSecs_        = 0.0f;
+		sinceEnterSecs_      = -1.0f;
+		followerEnterLogged_ = false;
+		playerEnterSeen_.store(false, std::memory_order_relaxed);
+		followerEnterSeen_.store(false, std::memory_order_relaxed);
+	}
+
+	void TetherController::UpdateEngaging(RE::PlayerCharacter* a_player, float a_delta)
+	{
+		auto  ptr      = target_.get();
+		auto* follower = ptr ? ptr.get() : nullptr;
+		if (!follower) {
+			CancelEngaging("target lost"sv);
+			return;
+		}
+		if (const char* reason = DetectTransition(a_player, follower)) {
+			CancelEngaging(reason);
+			return;
+		}
+		if (auto* st = a_player->AsActorState(); st && st->IsWeaponDrawn()) {
+			CancelEngaging("player weapon drawn"sv);
+			return;
+		}
+
+		engagingSecs_ += a_delta;
+
+		if (sinceEnterSecs_ < 0.0f) {
+			if (playerEnterSeen_.load(std::memory_order_relaxed)) {
+				sinceEnterSecs_ = 0.0f;
+				logger::info("engaging: OAR selected player Enter clip at +{:.0f}ms after hotkey"sv,
+					engagingSecs_ * 1000.0f);
+			}
+		} else {
+			sinceEnterSecs_ += a_delta;
+		}
+		if (!followerEnterLogged_ && followerEnterSeen_.load(std::memory_order_relaxed)) {
+			followerEnterLogged_ = true;
+			logger::info("engaging: OAR selected follower Enter clip at +{:.0f}ms after hotkey"sv,
+				engagingSecs_ * 1000.0f);
+		}
+
+		if (sinceEnterSecs_ >= Settings::GetSingleton()->GripDelay()) {
+			Grip(follower, a_player, "Enter clip + delay"sv);
+		} else if (sinceEnterSecs_ < 0.0f && engagingSecs_ >= kEnterWaitMax) {
+			Grip(follower, a_player, "fallback timeout (player Enter clip never selected)"sv);
+		}
+	}
+
+	void TetherController::Grip(RE::Actor* a_follower, RE::PlayerCharacter* a_player, std::string_view a_trigger)
+	{
+		CacheBones(a_follower, a_player);
+		if (kUseHavokConstraint) {
+			ApplyHavokConstraint(a_follower, a_player);
+		}
+		// Stops the engine's camera-pitch head follow on the player. Follower untouched.
+		SetHeadTracking(a_player, false);
+		state_ = State::Held;
+
+		auto& s = *Settings::GetSingleton();
+		logger::info("engaged: target='{}' (formID=0x{:08X}) trigger='{}' at +{:.0f}ms after hotkey offset(R={:.0f} B={:.0f} follow={:.0f}/catch={:.0f}) [kinematic={} constraint={}]"sv,
+			a_follower->GetName(), a_follower->GetFormID(), a_trigger, engagingSecs_ * 1000.0f,
+			s.OffsetRight(), s.OffsetBack(), s.FollowRadius(), s.CatchupRadius(),
+			kUseKinematicArm, kUseHavokConstraint);
+	}
+
+	void TetherController::CancelEngaging(std::string_view a_reason)
+	{
+		if (state_ != State::Engaging) return;
+
+		// Nothing Havok-side was applied yet — only the follow offset needs undoing.
+		if (auto ptr = target_.get(); ptr && ptr.get()) {
+			ClearOffset(ptr.get());
+		}
+		target_           = RE::ActorHandle{};
+		engageCell_       = nullptr;
+		engageWorldspace_ = nullptr;
+		state_            = State::Off;
+		logger::info("engaging cancelled: {} (at +{:.0f}ms after hotkey)"sv, a_reason, engagingSecs_ * 1000.0f);
+		ResetEngagingTimers();
+	}
+
 	void TetherController::ForceRelease()
 	{
+		if (state_ == State::Engaging) {
+			CancelEngaging("force release"sv);
+			return;
+		}
 		if (state_ != State::Held) return;
 
 		auto*        player = RE::PlayerCharacter::GetSingleton();

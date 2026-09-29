@@ -262,7 +262,7 @@ EndEvent
 ; =============================================================================
 Event OnOptionHighlight(Int option)
     If option == HotkeyID
-        SetInfoText("Key to toggle the tether. Supports keyboard and gamepad. Default: H")
+        SetInfoText("Key to toggle the tether. Supports keyboard and gamepad. Default: H. Note: the MCM keymap dialog may show Accept/Cancel reversed on some builds - just press the actual key you want to bind.")
     ElseIf option == AutoRelWeaponID
         SetInfoText("Release the tether automatically when the player draws a weapon. Default: ON")
     ElseIf option == AutoRelCombatID

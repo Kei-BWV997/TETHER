@@ -1,19 +1,25 @@
 #pragma once
 
+#include <atomic>
+
 namespace TETHER
 {
 	class TetherController
 	{
 	public:
+		// Off → Engaging (hotkey; Enter clip plays while still fully animated, no
+		// ragdoll yet) → Held (ragdoll + Havok constraint applied).
 		enum class State : std::uint8_t
 		{
 			Off,
+			Engaging,
 			Held
 		};
 
 		static TetherController* GetSingleton();
 
-		void  Toggle();
+		void  TryEngage();      // SkyPrompt 'Hold hands' accepted (game thread)
+		void  ReleaseByUser();  // release key pressed while Engaging/Held
 		void  OnUpdate(RE::PlayerCharacter* a_player, float a_delta);
 		void  ForceRelease();  // Emergency cleanup (cell change, kPreLoadGame, etc.)
 		State GetState() const { return state_; }
@@ -23,6 +29,12 @@ namespace TETHER
 		// matches the role.
 		bool  IsTetheredPlayer(RE::TESObjectREFR* a_actor) const;
 		bool  IsTetheredFollower(RE::TESObjectREFR* a_actor) const;
+		bool  IsEngagingPlayer(RE::TESObjectREFR* a_actor) const;
+		bool  IsEngagingFollower(RE::TESObjectREFR* a_actor) const;
+
+		// Called from OAR condition evaluation (may run off the main thread) when the
+		// Enter sub-mod's condition evaluates true, i.e. OAR is selecting the Enter clip.
+		void  MarkEnterSelected(bool a_player) const;
 
 		// Multiplier applied to a_actor's max movement speed while tethered.
 		// Returns 1.0 for actors not involved in the current tether.
@@ -81,11 +93,30 @@ namespace TETHER
 		bool CacheBones(RE::Actor* a_follower, RE::PlayerCharacter* a_player);
 		void ClearBones();
 
+		// Returns a reason string if a load transition / 3D loss was detected, else nullptr.
+		// Updates engageCell_ on harmless exterior-grid crossings.
+		const char* DetectTransition(RE::PlayerCharacter* a_player, RE::Actor* a_follower);
+
+		void UpdatePrompt(RE::PlayerCharacter* a_player);
+		void UpdateEngaging(RE::PlayerCharacter* a_player, float a_delta);
+		void Grip(RE::Actor* a_follower, RE::PlayerCharacter* a_player, std::string_view a_trigger);
+		void CancelEngaging(std::string_view a_reason);
+		void ResetEngagingTimers();
+
 		State                 state_             = State::Off;
 		RE::ActorHandle       target_;
 		BoneCache             bones_;
 		RE::TESObjectCELL*    engageCell_        = nullptr;
 		RE::TESWorldSpace*    engageWorldspace_  = nullptr;
 		float                 extremeDistSecs_   = 0.0f;
+
+		// Engaging-phase timers (main thread only).
+		float                 engagingSecs_      = 0.0f;   // since hotkey
+		float                 sinceEnterSecs_    = -1.0f;  // since player's Enter clip was selected; <0 = not yet
+		bool                  followerEnterLogged_ = false;
+
+		// Set from OAR evaluation threads, consumed on the main thread.
+		mutable std::atomic<bool> playerEnterSeen_{ false };
+		mutable std::atomic<bool> followerEnterSeen_{ false };
 	};
 }

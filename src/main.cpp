@@ -6,6 +6,8 @@
 #include "Settings.h"
 #include "OARConditions.h"
 #include "EquipEventSink.h"
+#include "Prompt.h"
+#include "UI.h"
 
 namespace
 {
@@ -46,6 +48,8 @@ namespace
 			break;
 		case SKSE::MessagingInterface::kDataLoaded:
 			TETHER::Settings::GetSingleton()->Load();
+			TETHER::Prompt::Install();
+			TETHER::UI::Install();
 			TETHER::InputHandler::Register();
 			TETHER::PlayerUpdateHook::Install();
 			TETHER::SpeedHook::Install();
@@ -56,6 +60,7 @@ namespace
 			// Tear down cleanly before save loads — otherwise cached bone pointers
 			// and havok state become invalid across the load and we CTD.
 			TETHER::TetherController::GetSingleton()->ForceRelease();
+			TETHER::Prompt::Hide();
 			break;
 		default:
 			break;

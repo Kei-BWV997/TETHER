@@ -19,6 +19,12 @@ set(SOURCE_FILES
 	"${SOURCE_DIR}/EquipEventSink.h"
 	"${SOURCE_DIR}/EquipEventSink.cpp"
 	"${SOURCE_DIR}/NetImmerseUtils.h"
+	"${SOURCE_DIR}/Prompt.h"
+	"${SOURCE_DIR}/Prompt.cpp"
+	"${SOURCE_DIR}/UI.h"
+	"${SOURCE_DIR}/UI.cpp"
+	"${SOURCE_DIR}/API/SkyPrompt/API.hpp"
+	"${SOURCE_DIR}/API/SKSEMenuFramework/SKSEMenuFramework.h"
 	"${SOURCE_DIR}/API/OpenAnimationReplacer-ConditionTypes.h"
 	"${SOURCE_DIR}/API/OpenAnimationReplacer-ConditionTypes.cpp"
 	"${SOURCE_DIR}/API/OpenAnimationReplacer-FunctionTypes.h"
@@ -80,6 +86,9 @@ target_include_directories(
 		"${CMAKE_CURRENT_BINARY_DIR}/src"
 		"${SOURCE_DIR}"
 )
+
+find_path(SIMPLEINI_INCLUDE_DIRS "SimpleIni.h" REQUIRED)
+target_include_directories("${PROJECT_NAME}" PRIVATE ${SIMPLEINI_INCLUDE_DIRS})
 
 add_subdirectory("$ENV{CommonLibSSEPath_NG}" CommonLibSSE EXCLUDE_FROM_ALL)
 

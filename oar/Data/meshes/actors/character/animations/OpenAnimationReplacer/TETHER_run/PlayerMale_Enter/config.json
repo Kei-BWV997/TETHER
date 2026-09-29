@@ -1,0 +1,22 @@
+{
+    "name": "TETHER Player Male Enter",
+    "description": "Male player reach-out clip played once before the hand-hold grips (Engaging phase, no ragdoll yet).",
+    "priority": 11,
+    "interruptible": true,
+    "conditions": [
+        {
+            "condition": "IsChild",
+            "requiredVersion": "1.0.0.0",
+            "negated": true
+        },
+        {
+            "condition": "IsFemale",
+            "requiredVersion": "1.0.0.0",
+            "negated": true
+        },
+        {
+            "condition": "TETHER_IsEngagingPlayer",
+            "requiredVersion": "1.0.0"
+        }
+    ]
+}

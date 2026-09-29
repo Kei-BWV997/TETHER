@@ -46,6 +46,47 @@ namespace TETHER::OARConditions
 		bool EvaluateImpl(RE::TESObjectREFR* a_refr, RE::hkbClipGenerator* a_cg, void* a_sm) const override;
 	};
 
-	// Register both conditions with OAR. Call from SKSE kPostLoad handler.
+	// Boolean condition: this actor is the player during the Engaging phase (hotkey
+	// pressed, Enter clip should play, ragdoll/constraint not applied yet).
+	class IsEngagingPlayerCondition : public Conditions::CustomCondition
+	{
+	public:
+		constexpr static inline std::string_view CONDITION_NAME = "TETHER_IsEngagingPlayer"sv;
+		IsEngagingPlayerCondition() = default;
+
+		RE::BSString GetName() const override { return CONDITION_NAME.data(); }
+		RE::BSString GetDescription() const override
+		{
+			return "True when this actor is the player during TETHER's Engaging phase (before the hand-hold grips). Put this condition LAST in the list."sv.data();
+		}
+		constexpr REL::Version GetRequiredVersion() const override { return { 1, 0, 0 }; }
+		RE::BSString GetArgument() const override    { return ""sv.data(); }
+		RE::BSString GetCurrent(RE::TESObjectREFR* a_refr) const override;
+
+	protected:
+		bool EvaluateImpl(RE::TESObjectREFR* a_refr, RE::hkbClipGenerator* a_cg, void* a_sm) const override;
+	};
+
+	// Boolean condition: this actor is the follower during the Engaging phase.
+	class IsEngagingFollowerCondition : public Conditions::CustomCondition
+	{
+	public:
+		constexpr static inline std::string_view CONDITION_NAME = "TETHER_IsEngagingFollower"sv;
+		IsEngagingFollowerCondition() = default;
+
+		RE::BSString GetName() const override { return CONDITION_NAME.data(); }
+		RE::BSString GetDescription() const override
+		{
+			return "True when this actor is the follower during TETHER's Engaging phase (before the hand-hold grips). Put this condition LAST in the list."sv.data();
+		}
+		constexpr REL::Version GetRequiredVersion() const override { return { 1, 0, 0 }; }
+		RE::BSString GetArgument() const override    { return ""sv.data(); }
+		RE::BSString GetCurrent(RE::TESObjectREFR* a_refr) const override;
+
+	protected:
+		bool EvaluateImpl(RE::TESObjectREFR* a_refr, RE::hkbClipGenerator* a_cg, void* a_sm) const override;
+	};
+
+	// Register all conditions with OAR. Call from SKSE kPostLoad handler.
 	void Register();
 }
